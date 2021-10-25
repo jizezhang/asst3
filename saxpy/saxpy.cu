@@ -7,6 +7,25 @@
 #include "CycleTimer.h"
 
 
+#define DEBUG
+
+#ifdef DEBUG
+#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
+inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr, "CUDA Error: %s at %s:%d\n", 
+        cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+#else
+#define cudaCheckError(ans) ans
+#endif
+
+
+
 // return GB/sec
 float GBPerSec(int bytes, float sec) {
   return static_cast<float>(bytes) / (1024. * 1024. * 1024.) / sec;
@@ -92,7 +111,7 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     // kernel launch) Execution on the GPU occurs here.
     double t0 = CycleTimer::currentSeconds();
     saxpy_kernel<<<blocks, threadsPerBlock>>>(N, alpha, device_x, device_y, device_result);
-    checkCudaErrors(cudaDeviceSynchronize());
+    cudaCheckError(cudaDeviceSynchronize());
     double t1 = CycleTimer::currentSeconds();
     printf("Time elapsed running kernel function: %.3f\n", t1 - t0);
 

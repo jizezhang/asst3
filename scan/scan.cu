@@ -14,6 +14,23 @@
 
 #define THREADS_PER_BLOCK 256
 
+#define DEBUG
+
+#ifdef DEBUG
+#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
+inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr, "CUDA Error: %s at %s:%d\n", 
+        cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+#else
+#define cudaCheckError(ans) ans
+#endif
+
 
 // helper function to round an integer up to the next power of 2
 static inline int nextPow2(int n) {
@@ -88,20 +105,18 @@ void exclusive_scan(int* input, int N, int* result)
     // to CUDA kernel functions (that you must write) to implement the
     // scan.
 
-    const int threadsPerBlock = 512;
-
     for (int i = 1; i <= N / 2; i*=2) {
       int n_threads = N / (2 * i);
-      int blocks = (n_threads + threadsPerBlock - 1) / threadsPerBlock;
-      upsweep_kernel<<<blocks, threadsPerBlock>>>(N, i, input);
-      checkCudaErrors(cudaDeviceSynchronize());
+      int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+      upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(N, i, input);
+      cudaCheckError(cudaDeviceSynchronize());
     }
 
     for (int i = N / 2; i >= 1; i/=2) {
       int n_threads = N / (2 * i);
-      int blocks = (n_threads + threadsPerBlock - 1) / threadsPerBlock;
-      downsweep_kernel<<<blocks, threadsPerBlock>>>(N, i, input);
-      checkCudaErrors(cudaDeviceSynchronize());
+      int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+      downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(N, i, input);
+      cudaCheckError(cudaDeviceSynchronize());
     }
 
     for (int i = 0; i < N; i++) {
@@ -241,15 +256,15 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // exclusive_scan function with them. However, your implementation
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
-    const int threadsPerBlock = 512;
-    int blocks = (length + threadsPerBlock - 1) / threadsPerBlock;
-    check_neighbor_kernel<<<blocks, threadPerBlock>>>(length, device_input);
-    checkCudaErrors(cudaDeviceSynchronize());
+
+    int blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    check_neighbor_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, device_input);
+    cudaCheckError(cudaDeviceSynchronize());
     int* tmp;
     cudaMalloc(&tmp, length * sizeof(int));
     exclusive_scan(device_input, length, tmp);
-    get_index_kernel<<<block, threadPerBlock>>>(length, tmp, device_output);
-    checkCudaErrors(cudaDeviceSynchronize());
+    get_index_kernel<<<block, THREADS_PER_BLOCK>>>(length, tmp, device_output);
+    cudaCheckError(cudaDeviceSynchronize());
     return tmp[-1]; 
 }
 
