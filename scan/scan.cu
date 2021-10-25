@@ -27,6 +27,40 @@ static inline int nextPow2(int n) {
     return n;
 }
 
+__global__ void
+upsweep_kernel(int N, int stride, int* input) {
+
+    // compute overall thread index from position of thread in current
+    // block, and given the block we are in (in this example only a 1D
+    // calculation is needed so the code only looks at the .x terms of
+    // blockDim and threadIdx.
+    int index = (blockIdx.x * blockDim.x + threadIdx.x) * stride * 2;
+
+
+    // this check is necessary to make the code work for values of N
+    // that are not a multiple of the thread block size (blockDim.x)
+    input[index + stride * 2 - 1] += input[index + stride - 1];
+}
+
+__global__ void
+downsweep_kernel(int N, int stride, int* input) {
+
+    // compute overall thread index from position of thread in current
+    // block, and given the block we are in (in this example only a 1D
+    // calculation is needed so the code only looks at the .x terms of
+    // blockDim and threadIdx.
+    int index = (blockIdx.x * blockDim.x + threadIdx.x) * stride * 2;
+
+    if (stride == 1 && index == N - 1) {
+      input[index] = 0;
+    }
+    // this check is necessary to make the code work for values of N
+    // that are not a multiple of the thread block size (blockDim.x)
+    int t = input[index + stride - 1];
+    input[index + stride - 1] = input[index + stride * 2 - 1];
+    input[index + stride * 2 - 1] += t;
+}
+
 // exclusive_scan --
 //
 // Implementation of an exclusive scan on global memory array `input`,
@@ -54,6 +88,25 @@ void exclusive_scan(int* input, int N, int* result)
     // to CUDA kernel functions (that you must write) to implement the
     // scan.
 
+    const int threadsPerBlock = 512;
+
+    for (int i = 1; i <= N / 2; i*=2) {
+      int n_threads = N / (2 * i);
+      int blocks = (n_threads + threadsPerBlock - 1) / threadsPerBlock;
+      upsweep_kernel<<<blocks, threadsPerBlock>>>(N, i, input);
+      checkCudaErrors(cudaDeviceSynchronize());
+    }
+
+    for (int i = N / 2; i >= 1; i/=2) {
+      int n_threads = N / (2 * i);
+      int blocks = (n_threads + threadsPerBlock - 1) / threadsPerBlock;
+      downsweep_kernel<<<blocks, threadsPerBlock>>>(N, i, input);
+      checkCudaErrors(cudaDeviceSynchronize());
+    }
+
+    for (int i = 0; i < N; i++) {
+      result[i] = input[i];
+    }
 
 }
 
@@ -140,6 +193,34 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration; 
 }
 
+__global__ void
+check_neighbor_kernel(int length, int* input) {
+
+    // compute overall thread index from position of thread in current
+    // block, and given the block we are in (in this example only a 1D
+    // calculation is needed so the code only looks at the .x terms of
+    // blockDim and threadIdx.
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index + 1 < length && input[index] == input[index + 1]) {
+      input[index] = 1;
+    } else {
+      input[index] = 0;
+    }
+}
+
+__global__ void
+get_index_kernel(int length, int* prefix_sum, int* output) {
+
+    // compute overall thread index from position of thread in current
+    // block, and given the block we are in (in this example only a 1D
+    // calculation is needed so the code only looks at the .x terms of
+    // blockDim and threadIdx.
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index > 0 && prefix_sum[index] == prefix_sum[index - 1] + 1) {
+      output[prefix_sum[index] - 1] = index - 1;
+    }
+}
+
 
 // find_repeats --
 //
@@ -160,8 +241,16 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // exclusive_scan function with them. However, your implementation
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
-
-    return 0; 
+    const int threadsPerBlock = 512;
+    int blocks = (length + threadsPerBlock - 1) / threadsPerBlock;
+    check_neighbor_kernel<<<blocks, threadPerBlock>>>(length, device_input);
+    checkCudaErrors(cudaDeviceSynchronize());
+    int* tmp;
+    cudaMalloc(&tmp, length * sizeof(int));
+    exclusive_scan(device_input, length, tmp);
+    get_index_kernel<<<block, threadPerBlock>>>(length, tmp, device_output);
+    checkCudaErrors(cudaDeviceSynchronize());
+    return tmp[-1]; 
 }
 
 
