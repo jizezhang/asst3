@@ -119,20 +119,27 @@ void exclusive_scan(int* input, int N, int* result)
     copy_kernel<<<blocks, THREADS_PER_BLOCK>>>(N, input, result);
     cudaCheckError(cudaDeviceSynchronize());
 
-    printf("N = %d rounded = %d\n", N, rounded_length);
+    // printf("N = %d rounded = %d\n", N, rounded_length);
     for (int i = 1; i <= rounded_length / 2; i*=2) {
       int n_threads = rounded_length / (2 * i);
-      int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-      printf("i = %d n_threads = %d, blocks = %d, rounded_length = %d \n", i, n_threads, blocks, rounded_length);
-      upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, i, result);
+      if (n_threads > THREADS_PER_BLOCK) {
+        int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, i, result);
+      } else {
+        upsweep_kernel<<<1, n_threads>>>(rounded_length, i, result);
+      }
       cudaCheckError(cudaDeviceSynchronize());
     }
 
     for (int i = rounded_length / 2; i >= 1; i/=2) {
       int n_threads = rounded_length / (2 * i);
-      int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-      printf("i = %d n_threads = %d, blocks = %d\n", i, n_threads, blocks);
-      downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, i, result);
+      if (n_threads > THREADS_PER_BLOCK) {
+        int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        // printf("i = %d n_threads = %d, blocks = %d\n", i, n_threads, blocks);
+        downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, i, result);
+      } else {
+        downsweep_kernel<<<1, n_threads>>>(rounded_length, i, result);
+      }
       cudaCheckError(cudaDeviceSynchronize());
     }
 }
