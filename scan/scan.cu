@@ -52,11 +52,14 @@ upsweep_kernel(int N, int stride, int* input) {
     // calculation is needed so the code only looks at the .x terms of
     // blockDim and threadIdx.
     int index = (blockIdx.x * blockDim.x + threadIdx.x) * stride * 2;
+    
+    if (index + stride * 2 - 1 < N) {
+      input[index + stride * 2 - 1] += input[index + stride - 1];
+    }
 
-
-    // this check is necessary to make the code work for values of N
-    // that are not a multiple of the thread block size (blockDim.x)
-    input[index + stride * 2 - 1] += input[index + stride - 1];
+    if (stride == N/2 && index == 0) {
+      input[N - 1] = 0;
+    }
 }
 
 __global__ void
@@ -67,15 +70,22 @@ downsweep_kernel(int N, int stride, int* input) {
     // calculation is needed so the code only looks at the .x terms of
     // blockDim and threadIdx.
     int index = (blockIdx.x * blockDim.x + threadIdx.x) * stride * 2;
-
-    if (stride == 1 && index == N - 1) {
-      input[index] = 0;
+    
+    if (index + stride * 2 - 1 < N) {
+      int t = input[index + stride - 1];
+      input[index + stride - 1] = input[index + stride * 2 - 1];
+      input[index + stride * 2 - 1] += t;
     }
-    // this check is necessary to make the code work for values of N
-    // that are not a multiple of the thread block size (blockDim.x)
-    int t = input[index + stride - 1];
-    input[index + stride - 1] = input[index + stride * 2 - 1];
-    input[index + stride * 2 - 1] += t;
+}
+
+__global__ void
+copy_kernel(int N, int* input, int* result) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < N) {
+    result[index] = input[index];
+  } else {
+    result[index] = 0;
+  }
 }
 
 // exclusive_scan --
@@ -104,25 +114,27 @@ void exclusive_scan(int* input, int N, int* result)
     // on the CPU.  Your implementation will need to make multiple calls
     // to CUDA kernel functions (that you must write) to implement the
     // scan.
+    int rounded_length = nextPow2(N);
+    int blocks = (rounded_length + THREADS_PER_BLOCK - 1)/ THREADS_PER_BLOCK;
+    copy_kernel<<<blocks, THREADS_PER_BLOCK>>>(N, input, result);
+    cudaCheckError(cudaDeviceSynchronize());
 
-    for (int i = 1; i <= N / 2; i*=2) {
-      int n_threads = N / (2 * i);
+    printf("N = %d rounded = %d\n", N, rounded_length);
+    for (int i = 1; i <= rounded_length / 2; i*=2) {
+      int n_threads = rounded_length / (2 * i);
       int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-      upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(N, i, input);
+      printf("i = %d n_threads = %d, blocks = %d, rounded_length = %d \n", i, n_threads, blocks, rounded_length);
+      upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, i, result);
       cudaCheckError(cudaDeviceSynchronize());
     }
 
-    for (int i = N / 2; i >= 1; i/=2) {
-      int n_threads = N / (2 * i);
+    for (int i = rounded_length / 2; i >= 1; i/=2) {
+      int n_threads = rounded_length / (2 * i);
       int blocks = (n_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-      downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(N, i, input);
+      printf("i = %d n_threads = %d, blocks = %d\n", i, n_threads, blocks);
+      downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(rounded_length, i, result);
       cudaCheckError(cudaDeviceSynchronize());
     }
-
-    for (int i = 0; i < N; i++) {
-      result[i] = input[i];
-    }
-
 }
 
 
@@ -209,7 +221,7 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
 }
 
 __global__ void
-check_neighbor_kernel(int length, int* input) {
+check_neighbor_kernel(int length, int* input, int* output) {
 
     // compute overall thread index from position of thread in current
     // block, and given the block we are in (in this example only a 1D
@@ -217,22 +229,24 @@ check_neighbor_kernel(int length, int* input) {
     // blockDim and threadIdx.
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index + 1 < length && input[index] == input[index + 1]) {
-      input[index] = 1;
+      output[index] = 1;
     } else {
-      input[index] = 0;
+      output[index] = 0;
     }
 }
 
 __global__ void
-get_index_kernel(int length, int* prefix_sum, int* output) {
+get_index_kernel(int length, int* prefix_sum, int* output, int* num_pairs) {
 
     // compute overall thread index from position of thread in current
     // block, and given the block we are in (in this example only a 1D
     // calculation is needed so the code only looks at the .x terms of
     // blockDim and threadIdx.
     int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index > 0 && prefix_sum[index] == prefix_sum[index - 1] + 1) {
-      output[prefix_sum[index] - 1] = index - 1;
+    if (index < length - 1 && prefix_sum[index] + 1 == prefix_sum[index + 1]) {
+      output[prefix_sum[index]] = index;
+    } else if (index == length - 1) {
+      num_pairs[0] = prefix_sum[index];
     }
 }
 
@@ -258,14 +272,22 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // the actual array length.
 
     int blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    check_neighbor_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, device_input);
-    cudaCheckError(cudaDeviceSynchronize());
     int* tmp;
-    cudaMalloc(&tmp, length * sizeof(int));
-    exclusive_scan(device_input, length, tmp);
-    get_index_kernel<<<block, THREADS_PER_BLOCK>>>(length, tmp, device_output);
+    int num_pairs[1];
+    int* device_num_pairs;
+    int rounded_length = nextPow2(length);
+    cudaMalloc((void **)&tmp, rounded_length * sizeof(int));
+    cudaMalloc((void **)&device_num_pairs, sizeof(int));
+    cudaMemcpy(device_num_pairs, num_pairs, sizeof(int), cudaMemcpyHostToDevice);
+    
+    check_neighbor_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, device_input, device_output);
     cudaCheckError(cudaDeviceSynchronize());
-    return tmp[-1]; 
+    exclusive_scan(device_output, length, tmp);
+    get_index_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, tmp, device_output, device_num_pairs);
+    cudaMemcpy(num_pairs, device_num_pairs, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaCheckError(cudaDeviceSynchronize());
+    return num_pairs[0]; 
+    // return 0;
 }
 
 
