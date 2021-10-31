@@ -13,6 +13,25 @@
 #include "noise.h"
 #include "sceneLoader.h"
 #include "util.h"
+#include "circleBoxTest.cu_inl"
+
+
+#define DEBUG
+
+#ifdef DEBUG
+#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
+inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr, "CUDA Error: %s at %s:%d\n", 
+        cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+#else
+#define cudaCheckError(ans) ans
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Putting all the cuda kernels here
@@ -379,16 +398,77 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
     // END SHOULD-BE-ATOMIC REGION
 }
 
+__global__ void kernelRenderCircles(const int numCircles) {
+
+  short imageWidth = cuConstRendererParams.imageWidth;
+  short imageHeight = cuConstRendererParams.imageHeight;
+  float invWidth = 1.f / imageWidth;
+  float invHeight = 1.f / imageHeight;
+
+  int left_bound = blockIdx.x * blockDim.x;
+  int right_bound = (blockIdx.x + 1) * blockDim.x;
+  if (right_bound > imageWidth) {
+    right_bound = imageWidth;
+  }
+  int upper_bound = blockIdx.y * blockDim.y;
+  int lower_bound = (blockIdx.y + 1) * blockDim.y;
+  if (lower_bound > imageHeight) {
+    lower_bound = imageHeight;
+  }
+
+  // printf("block id x %d, block id y %d L %d R %d T %d B %d \n", blockIdx.x, blockIdx.y, left_bound, right_bound, upper_bound, lower_bound);
+
+  extern __shared__ bool flags[];
+
+  int id = blockDim.x * threadIdx.y + threadIdx.x;
+
+  for (int i = id; i < numCircles; i += blockDim.x * blockDim.y) {
+    float r = cuConstRendererParams.radius[i];
+    float3 p = *(float3*)(&cuConstRendererParams.position[3 * i]);
+    flags[i] = (circleInBoxConservative(p.x, p.y, r, left_bound * invWidth, right_bound * invWidth, upper_bound * invHeight, lower_bound * invHeight) == 1);
+    // printf("block id x %d, block id y %d, flags %d = %d \n", blockIdx.x, blockIdx.y, i, flags[i]);
+  }
+  __syncthreads();
+
+  // printf("any overlap?");
+  // if (threadIdx.x == 0 && threadIdx.y == 0) {
+  //   for (int i = 0; i < numCircles; i++) {
+  //     if (flags[i])
+  //     printf("block id %d, %d overlap with %d", blockIdx.x, blockIdx.y, i);
+  //   }
+  // }
+
+  int x = blockIdx.x * blockDim.x + threadIdx.x;
+  int y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= imageWidth || y >= imageHeight) {
+    return;
+  }
+
+  // printf("block id x %d, block id y %d, x %d y %d \n", blockIdx.x, blockIdx.y, x, y);
+
+  float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (y * imageWidth + x)]);
+  float2 pixelCenterNorm = make_float2(
+    invWidth * (static_cast<float>(x) + 0.5f),
+    invHeight * (static_cast<float>(y) + 0.5f)
+  );
+  for (int i = 0; i < numCircles; i++) {
+    if (flags[i]) {
+      float3 p_circle = *(float3*)(&cuConstRendererParams.position[3 * i]);
+      shadePixel(i, pixelCenterNorm, p_circle, imgPtr);
+    }
+  }
+}
+
 // kernelRenderCircles -- (CUDA device code)
 //
 // Each thread renders a circle.  Since there is no protection to
 // ensure order of update or mutual exclusion on the output image, the
 // resulting image will be incorrect.
-__global__ void kernelRenderCircles() {
+__global__ void kernelRenderCirclesOld(int* in_degrees, int i) {
 
     int index = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (index >= cuConstRendererParams.numCircles)
+    if (index >= cuConstRendererParams.numCircles || in_degrees[index] != i)
         return;
 
     int index3 = 3 * index;
@@ -637,9 +717,13 @@ void
 CudaRenderer::render() {
 
     // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
-
-    kernelRenderCircles<<<gridDim, blockDim>>>();
-    cudaDeviceSynchronize();
+    dim3 blockDim(16, 16, 1);
+    dim3 gridDim(
+      (image->width + blockDim.x - 1) / blockDim.x,
+      (image->height + blockDim.y - 1) / blockDim.y
+    );
+    printf("image width %d, image height %d \n", image->width, image->height);
+    printf("grid Dim %d, %d block Dim %d %d\n", gridDim.x, gridDim.y, blockDim.x, blockDim.y);
+    kernelRenderCircles<<<gridDim, blockDim, numCircles * sizeof(bool)>>>(numCircles);
+    cudaCheckError(cudaDeviceSynchronize());
 }
