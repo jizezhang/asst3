@@ -242,8 +242,10 @@ check_neighbor_kernel(int length, int* input, int* output) {
     }
 }
 
+__device__ int device_num_pairs;
+
 __global__ void
-get_index_kernel(int length, int* prefix_sum, int* output, int* num_pairs) {
+get_index_kernel(int length, int* prefix_sum, int* output) {
 
     // compute overall thread index from position of thread in current
     // block, and given the block we are in (in this example only a 1D
@@ -253,10 +255,9 @@ get_index_kernel(int length, int* prefix_sum, int* output, int* num_pairs) {
     if (output[index] == 1) {
       output[prefix_sum[index]] = index;
     } else if (index == length - 1) {
-      num_pairs[0] = prefix_sum[index];
+      device_num_pairs = prefix_sum[index];
     }
 }
-
 
 // find_repeats --
 //
@@ -280,21 +281,23 @@ int find_repeats(int* device_input, int length, int* device_output) {
 
     int blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     int* tmp;
-    int num_pairs[1];
-    int* device_num_pairs;
+    // int num_pairs[1];
+    // int* device_num_pairs;
     int rounded_length = nextPow2(length);
     cudaMalloc((void **)&tmp, rounded_length * sizeof(int));
-    cudaMalloc((void **)&device_num_pairs, sizeof(int));
-    cudaMemcpy(device_num_pairs, num_pairs, sizeof(int), cudaMemcpyHostToDevice);
+    // cudaMalloc((void **)&device_num_pairs, sizeof(int));
+    // cudaMemcpy(device_num_pairs, num_pairs, sizeof(int), cudaMemcpyHostToDevice);
     
     check_neighbor_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, device_input, device_output);
     cudaCheckError(cudaDeviceSynchronize());
     exclusive_scan(device_output, length, tmp);
-    get_index_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, tmp, device_output, device_num_pairs);
-    cudaMemcpy(num_pairs, device_num_pairs, sizeof(int), cudaMemcpyDeviceToHost);
+    get_index_kernel<<<blocks, THREADS_PER_BLOCK>>>(length, tmp, device_output);
+    int num_pairs;
+    cudaMemcpyFromSymbol(&num_pairs, device_num_pairs, sizeof(num_pairs), 0, cudaMemcpyDeviceToHost);
+    // cudaMemcpy(num_pairs, device_num_pairs, sizeof(int), cudaMemcpyDeviceToHost);
     cudaCheckError(cudaDeviceSynchronize());
-    return num_pairs[0]; 
-    // return 0;
+    cudaFree(tmp);
+    return num_pairs;
 }
 
 

@@ -113,7 +113,6 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     saxpy_kernel<<<blocks, threadsPerBlock>>>(N, alpha, device_x, device_y, device_result);
     cudaCheckError(cudaDeviceSynchronize());
     double t1 = CycleTimer::currentSeconds();
-    printf("Time elapsed running kernel function: %.3f\n", t1 - t0);
 
     //
     // CS149 TODO: copy result from GPU back to CPU using cudaMemcpy
@@ -130,6 +129,8 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     }
 
     double overallDuration = endTime - startTime;
+    printf("Time elapsed running kernel function: %.3f ms\n", 1000.f * (t1 - t0));
+    printf("total bytes %d \n", totalBytes);
     printf("Effective BW by CUDA saxpy: %.3f ms\t\t[%.3f GB/s]\n", 1000.f * overallDuration, GBPerSec(totalBytes, overallDuration));
 
     //
