@@ -250,7 +250,7 @@ get_index_kernel(int length, int* prefix_sum, int* output, int* num_pairs) {
     // calculation is needed so the code only looks at the .x terms of
     // blockDim and threadIdx.
     int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < length - 1 && prefix_sum[index] + 1 == prefix_sum[index + 1]) {
+    if (output[index] == 1) {
       output[prefix_sum[index]] = index;
     } else if (index == length - 1) {
       num_pairs[0] = prefix_sum[index];

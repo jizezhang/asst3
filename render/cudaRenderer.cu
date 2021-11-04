@@ -14,6 +14,9 @@
 #include "sceneLoader.h"
 #include "util.h"
 #include "circleBoxTest.cu_inl"
+#define SCAN_BLOCK_DIM 256
+#include "exclusiveScan.cu_inl"
+#define BLOCKSIZE 256
 
 
 #define DEBUG
@@ -398,12 +401,13 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
     // END SHOULD-BE-ATOMIC REGION
 }
 
-__global__ void kernelRenderCircles(int numCircles, int shared_size) {
+__global__ void kernelRenderCircles() {
 
   short imageWidth = cuConstRendererParams.imageWidth;
   short imageHeight = cuConstRendererParams.imageHeight;
   float invWidth = 1.f / imageWidth;
   float invHeight = 1.f / imageHeight;
+  int numCircles = cuConstRendererParams.numCircles;
 
   int x = blockIdx.x * blockDim.x + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -428,25 +432,35 @@ __global__ void kernelRenderCircles(int numCircles, int shared_size) {
     invHeight * (static_cast<float>(y) + 0.5f)
   );
 
-  extern __shared__ bool flags[];
+  __shared__ uint flags[BLOCKSIZE];
+  __shared__ uint prefixSumOutput[BLOCKSIZE];
+  __shared__ uint prefixSumScratch[2 * BLOCKSIZE];
+  __shared__ uint circleIds[BLOCKSIZE];
+  int id = threadIdx.y * blockDim.x + threadIdx.x;
 
-  int id = blockDim.x * threadIdx.y + threadIdx.x;
-
-  for (int start = 0; start < numCircles; start += shared_size) {
-    for (int i = start + id; i < start + shared_size; i += blockDim.x * blockDim.y) {
-      if (i < numCircles) {
-        float r = cuConstRendererParams.radius[i];
-        float3 p = *(float3*)(&cuConstRendererParams.position[3 * i]);
-        flags[i - start] = circleInBoxConservative(p.x, p.y, r, left_bound * invWidth, right_bound * invWidth, lower_bound * invHeight, upper_bound * invHeight);
-      }
+  for (int start = 0; start < numCircles; start += BLOCKSIZE) {
+    int i = start + id;
+    if (i < numCircles) {
+      float r = cuConstRendererParams.radius[i];
+      float3 p = *(float3*)(&cuConstRendererParams.position[3 * i]);
+      flags[id] = circleInBoxConservative(p.x, p.y, r, left_bound * invWidth, right_bound * invWidth, lower_bound * invHeight, upper_bound * invHeight);
+    } else {
+      flags[id] = 0;
     }
     __syncthreads();
 
-    for (int i = start; i < start + shared_size; i++) {
-      if (i < numCircles && flags[i - start]) {
-        float3 p_circle = *(float3*)(&cuConstRendererParams.position[3 * i]);
-        shadePixel(i, pixelCenterNorm, p_circle, imgPtr);
-      }
+    sharedMemExclusiveScan(id, flags, prefixSumOutput, prefixSumScratch, BLOCKSIZE);
+    __syncthreads();
+    int total = prefixSumOutput[BLOCKSIZE - 1] + flags[BLOCKSIZE - 1];
+    if (total == 0) continue;
+    if (flags[id] == 1) {
+      circleIds[prefixSumOutput[id]] = id + start;
+    }
+    __syncthreads();
+
+    for (int j = 0; j < total; j++) {
+      float3 p_circle = *(float3*)(&cuConstRendererParams.position[3 * circleIds[j]]);
+      shadePixel(circleIds[j], pixelCenterNorm, p_circle, imgPtr);
     }
   }
 }
@@ -661,12 +675,11 @@ void
 CudaRenderer::render() {
 
     // 256 threads per block is a healthy number
-    int shared_size = std::min(numCircles, 32000);
     dim3 blockDim(16, 16, 1);
     dim3 gridDim(
       (image->width + blockDim.x - 1) / blockDim.x,
       (image->height + blockDim.y - 1) / blockDim.y
     );
-    kernelRenderCircles<<<gridDim, blockDim, shared_size * sizeof(bool)>>>(numCircles, shared_size);
+    kernelRenderCircles<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }
