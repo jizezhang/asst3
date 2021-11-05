@@ -462,6 +462,7 @@ __global__ void kernelRenderCircles() {
       float3 p_circle = *(float3*)(&cuConstRendererParams.position[3 * circleIds[j]]);
       shadePixel(circleIds[j], pixelCenterNorm, p_circle, imgPtr);
     }
+    __syncthreads();
   }
 }
 
